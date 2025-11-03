@@ -1,28 +1,9 @@
-# RepLabeler Requirements
-# Python dependencies for the exercise video annotation tool
+# Video Pose Repetition Labeller Dependencies
 
-# Core GUI and imaging
-tkinter>=8.6.0  # Usually comes with Python
-Pillow>=8.3.0
-opencv-python>=4.5.0
+# Core GUI and image processing
+opencv-python>=4.8.0
+Pillow>=9.0.0
 
-# Scientific computing
-numpy>=1.21.0
-
-# MMPose and dependencies (ensure these are compatible)
-# Note: MMPose should be installed following official instructions
-# pip install mmpose
-# The following are typical MMPose dependencies:
-mmcv>=2.0.0
-mmengine>=0.7.0
-torch>=1.8.0
-torchvision>=0.9.0
-
-# Optional for enhanced functionality
-matplotlib>=3.5.0  # For potential plotting features
-scipy>=1.7.0       # For signal processing if needed
-
-# Development dependencies (optional)
-pytest>=6.0.0      # For testing
-black>=22.0.0      # Code formatting
-flake8>=4.0.0      # Linting
+# Note: tkinter is included with most Python installations
+# If tkinter is not available, install python3-tk (Ubuntu/Debian) 
+# or use a Python distribution that includes tkinter
