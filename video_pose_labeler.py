@@ -126,6 +126,13 @@ class VideoPoseLabellerApp:
             row=6, column=0, pady=(10, 0), sticky="ew"
         )
 
+        # Build aggregated video_config.json button
+        ttk.Button(
+            sidebar,
+            text="Build video_config.json",
+            command=self.build_video_config,
+        ).grid(row=7, column=0, pady=(6, 0), sticky="ew")
+
         sidebar.rowconfigure(3, weight=1)
         sidebar.rowconfigure(5, weight=2)
 
@@ -190,11 +197,25 @@ class VideoPoseLabellerApp:
         info_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         info_frame.columnconfigure(0, weight=1)
 
+        # Binary label editor
+        binary_frame = ttk.Frame(info_frame)
+        binary_frame.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        binary_frame.columnconfigure(1, weight=1)
+        
+        ttk.Label(binary_frame, text="Binary Label:").grid(row=0, column=0, sticky="w")
+        self.binary_entry = ttk.Entry(binary_frame, width=20)
+        self.binary_entry.grid(row=0, column=1, sticky="ew", padx=(5, 0))
+        self.binary_entry.bind("<Return>", self.on_binary_label_changed)
+        
+        ttk.Button(binary_frame, text="Update", command=self.on_binary_label_changed).grid(
+            row=0, column=2, padx=(5, 0)
+        )
+
         ttk.Label(info_frame, textvariable=self.current_state_var, anchor="w").grid(
-            row=0, column=0, sticky="ew"
+            row=1, column=0, sticky="ew"
         )
         ttk.Label(info_frame, textvariable=self.sequence_var, anchor="w", foreground="#444").grid(
-            row=1, column=0, sticky="ew"
+            row=2, column=0, sticky="ew"
         )
 
         self.annotation_tree = ttk.Treeview(
@@ -210,6 +231,23 @@ class VideoPoseLabellerApp:
         self.annotation_tree.column("end", width=80, anchor="center")
         self.annotation_tree.column("label", width=120, anchor="center")
         self.annotation_tree.grid(row=4, column=0, sticky="nsew", pady=(6, 0))
+        
+        # Add double-click editing for annotations
+        self.annotation_tree.bind("<Double-1>", self.on_annotation_double_click)
+        
+        # Add buttons for annotation management
+        annotation_buttons = ttk.Frame(main)
+        annotation_buttons.grid(row=5, column=0, sticky="ew", pady=(4, 0))
+        
+        ttk.Button(annotation_buttons, text="Edit Selected", command=self.edit_selected_annotation).grid(
+            row=0, column=0, padx=2
+        )
+        ttk.Button(annotation_buttons, text="Delete Selected", command=self.delete_selected_annotation).grid(
+            row=0, column=1, padx=2
+        )
+        ttk.Button(annotation_buttons, text="Insert Segment", command=self.insert_segment).grid(
+            row=0, column=2, padx=2
+        )
 
         status_bar = ttk.Label(self.root, textvariable=self.status_var, anchor="w", padding=6)
         status_bar.grid(row=1, column=0, columnspan=2, sticky="ew")
@@ -358,6 +396,303 @@ class VideoPoseLabellerApp:
         self._refresh_state_ui()
         self._update_annotation_view()
         self._update_buttons()
+        
+        # Update the binary label entry field
+        self.binary_entry.delete(0, tk.END)
+        self.binary_entry.insert(0, self.binary_label)
+
+    # ------------------------------------------------------------------
+    # Binary label and annotation editing
+    # ------------------------------------------------------------------
+    def on_binary_label_changed(self, event=None) -> None:
+        """Handle changes to the binary label field."""
+        new_binary = self.binary_entry.get().strip()
+        
+        if not all(ch in "01" for ch in new_binary):
+            messagebox.showerror("Invalid binary label", "Binary label must contain only 0 and 1")
+            self.binary_entry.delete(0, tk.END)
+            self.binary_entry.insert(0, self.binary_label)
+            return
+        
+        if new_binary != self.binary_label:
+            if self.recorded_segments:
+                response = messagebox.askyesno(
+                    "Binary label changed",
+                    "Changing the binary label will clear existing annotations. Continue?"
+                )
+                if not response:
+                    self.binary_entry.delete(0, tk.END)
+                    self.binary_entry.insert(0, self.binary_label)
+                    return
+                
+            self.binary_label = new_binary
+            self.state_sequence = self._build_state_sequence(new_binary)
+            self.recorded_segments.clear()
+            self.current_state_index = 0
+            self.state_start_frame = 0
+            self.seek_to_frame(0)
+            self._refresh_state_ui()
+            self._update_annotation_view()
+            self._update_buttons()
+    
+    def on_annotation_double_click(self, event) -> None:
+        """Handle double-click on annotation tree items."""
+        selection = self.annotation_tree.selection()
+        if selection:
+            self.edit_selected_annotation()
+    
+    def edit_selected_annotation(self) -> None:
+        """Edit the selected annotation segment."""
+        selection = self.annotation_tree.selection()
+        if not selection:
+            messagebox.showinfo("No selection", "Please select an annotation to edit.")
+            return
+            
+        item = selection[0]
+        values = self.annotation_tree.item(item, "values")
+        if not values or len(values) < 3:
+            return
+            
+        start_frame = int(values[0])
+        end_frame = int(values[1])
+        label = values[2]
+        
+        # Don't allow editing finish segment
+        if label == "finish":
+            messagebox.showinfo("Cannot edit", "The 'finish' segment is automatically managed.")
+            return
+        
+        # Find the segment index
+        segment_index = None
+        for i, seg in enumerate(self.recorded_segments):
+            if seg.start == start_frame and seg.end == end_frame and seg.label == label:
+                segment_index = i
+                break
+                
+        if segment_index is None:
+            messagebox.showerror("Error", "Could not find the selected segment.")
+            return
+            
+        # Create edit dialog
+        dialog = SegmentEditDialog(self.root, start_frame, end_frame, label, self.total_frames)
+        if dialog.result:
+            new_start, new_end, new_label = dialog.result
+            
+            # Update the segment
+            self.recorded_segments[segment_index].start = new_start
+            self.recorded_segments[segment_index].end = new_end
+            self.recorded_segments[segment_index].label = new_label
+            
+            # Re-sort segments and update UI
+            self.recorded_segments.sort(key=lambda seg: seg.start)
+            self._update_annotation_view()
+            self.status_var.set("Annotation updated")
+    
+    def delete_selected_annotation(self) -> None:
+        """Delete the selected annotation segment."""
+        selection = self.annotation_tree.selection()
+        if not selection:
+            messagebox.showinfo("No selection", "Please select an annotation to delete.")
+            return
+            
+        item = selection[0]
+        values = self.annotation_tree.item(item, "values")
+        if not values or len(values) < 3:
+            return
+            
+        start_frame = int(values[0])
+        end_frame = int(values[1])
+        label = values[2]
+        
+        # Don't allow deleting finish segment
+        if label == "finish":
+            messagebox.showinfo("Cannot delete", "The 'finish' segment cannot be deleted.")
+            return
+        
+        response = messagebox.askyesno(
+            "Delete segment", 
+            f"Delete segment '{label}' ({start_frame}-{end_frame})?"
+        )
+        if not response:
+            return
+        
+        # Find and remove the segment
+        for i, seg in enumerate(self.recorded_segments):
+            if seg.start == start_frame and seg.end == end_frame and seg.label == label:
+                self.recorded_segments.pop(i)
+                break
+                
+        # Update state tracking
+        self.current_state_index = len(self.recorded_segments)
+        self.state_start_frame = 0 if not self.recorded_segments else self.recorded_segments[-1].end + 1
+        self.state_start_frame = min(self.state_start_frame, max(self.total_frames - 1, 0))
+        
+        self._refresh_state_ui()
+        self._update_annotation_view()
+        self._update_buttons()
+        self.status_var.set("Annotation deleted")
+    
+    def insert_segment(self) -> None:
+        """Insert a new segment at the current frame."""
+        if not self.capture or not self.state_sequence:
+            messagebox.showwarning("No video", "Please load a video first.")
+            return
+            
+        # Create dialog for new segment
+        dialog = SegmentEditDialog(
+            self.root, 
+            self.current_frame, 
+            min(self.current_frame + 30, self.total_frames - 1),
+            "rep", 
+            self.total_frames
+        )
+        if dialog.result:
+            new_start, new_end, new_label = dialog.result
+            
+            # Insert the new segment
+            new_segment = Segment(new_start, new_end, new_label)
+            self.recorded_segments.append(new_segment)
+            
+            # Re-sort segments and update UI
+            self.recorded_segments.sort(key=lambda seg: seg.start)
+            self._update_annotation_view()
+            self.status_var.set("Segment inserted")
+
+    # ------------------------------------------------------------------
+    # Build aggregated video_config.json
+    # ------------------------------------------------------------------
+    def build_video_config(self) -> None:
+        """Scan json_keypoints and build/update CFRep/CFRep/video_config.json.
+
+        Rules:
+        - Only include videos that have annotations.
+        - Include full segments list (including 'finish' if present).
+        - Exclude derived rep_windows to keep schema minimal.
+        - Compute binary_label from JSON or derive it from the segments if missing.
+        - rep_count is number of segments labeled 'rep'.
+        - Incremental: if video_config.json exists, update/append entries by filename.
+        Schema per entry:
+            {
+                filename, exercise, binary_label, rep_count, segments: [ {start,end,label}, ... ]
+            }
+        """
+        if not self.json_root:
+            messagebox.showwarning("Select folder", "Please choose a json_keypoints folder first")
+            return
+
+        output_path = self.json_root.parent / "video_config.json"
+
+        # Load existing aggregated file if present
+        existing_by_filename: dict[str, dict] = {}
+        if output_path.exists():
+            try:
+                with output_path.open("r", encoding="utf-8") as f:
+                    existing_list = json.load(f)
+                if isinstance(existing_list, list):
+                    for item in existing_list:
+                        fn = item.get("filename")
+                        if fn:
+                            existing_by_filename[str(fn)] = item
+            except Exception:
+                # If unreadable, start fresh
+                existing_by_filename = {}
+
+        processed = 0
+        skipped = 0
+
+        # Traverse exercises and samples
+        try:
+            exercise_dirs = [d for d in sorted(self.json_root.iterdir()) if d.is_dir() and not d.name.startswith(".")]
+        except FileNotFoundError:
+            messagebox.showerror("Folder not found", f"Cannot access {self.json_root}")
+            return
+
+        for exercise_dir in exercise_dirs:
+            for sample_dir in sorted(exercise_dir.iterdir()):
+                if not sample_dir.is_dir() or sample_dir.name.startswith("."):
+                    continue
+                json_files = sorted(sample_dir.glob("*.json"))
+                if not json_files:
+                    continue
+
+                # Use the first JSON in the folder as primary
+                primary = json_files[0]
+                try:
+                    with primary.open("r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    skipped += 1
+                    continue
+
+                annotations = data.get("annotations")
+                if not isinstance(annotations, list) or not annotations:
+                    # Skip videos without annotations
+                    skipped += 1
+                    continue
+
+                # Normalize segments and build rep_windows
+                segments: list[dict] = []
+                try:
+                    for seg in annotations:
+                        start = int(seg["start"])  # type: ignore[index]
+                        end = int(seg["end"])      # type: ignore[index]
+                        label = str(seg["label"])  # type: ignore[index]
+                        segments.append({"start": start, "end": end, "label": label})
+                except Exception:
+                    skipped += 1
+                    continue
+
+                # Count reps (segments labeled 'rep')
+                rep_count = sum(1 for s in segments if s.get("label") == "rep")
+
+                # Determine filename and exercise
+                video_path_val = data.get("video_path")
+                if video_path_val:
+                    filename = Path(str(video_path_val)).name
+                else:
+                    # Fallback to folder name assumption
+                    filename = f"{sample_dir.name}.mp4"
+
+                # Determine binary_label (prefer existing in JSON, else derive)
+                binary_label = str(data.get("binary_label") or "")
+                if not binary_label:
+                    # Derive from segments by mapping middle labels
+                    labels_in_order = [s.get("label") for s in segments]
+                    # remove prep and finish if present
+                    middle = [lbl for lbl in labels_in_order if lbl in ("rep", "no-rep")]
+                    try:
+                        binary_label = "".join("1" if lbl == "rep" else "0" for lbl in middle)
+                    except Exception:
+                        binary_label = ""
+
+                entry = {
+                    "filename": filename,
+                    "exercise": exercise_dir.name,
+                    "binary_label": binary_label,
+                    "rep_count": rep_count,
+                    "segments": segments,
+                }
+
+                existing_by_filename[filename] = entry
+                processed += 1
+
+        # Write back as a list sorted by filename
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            aggregated_list = [existing_by_filename[k] for k in sorted(existing_by_filename.keys())]
+            with output_path.open("w", encoding="utf-8") as f:
+                json.dump(aggregated_list, f, indent=2)
+        except Exception as exc:
+            messagebox.showerror("Write error", f"Failed to write {output_path}: {exc}")
+            return
+
+        self.status_var.set(
+            f"Updated video_config.json — processed {processed}, skipped {skipped}"
+        )
+        messagebox.showinfo(
+            "Compilation complete",
+            f"video_config.json written at:\n{output_path}\n\nProcessed: {processed}\nSkipped (no annotations): {skipped}",
+        )
 
     def prompt_binary_label(self, sample: str) -> Optional[str]:
         return simpledialog.askstring(
@@ -408,24 +743,27 @@ class VideoPoseLabellerApp:
         annotations = primary_data.get("annotations")
         if not isinstance(annotations, list) or not annotations:
             return None
-        try:
-            labels = [item["label"] for item in annotations]
-        except (TypeError, KeyError):
-            return None
-        if labels[0] != "prep" or labels[-1] != "finish":
-            return None
-        expected_middle = ["rep" if bit == "1" else "no-rep" for bit in self.binary_label]
-        if labels[1:-1] != expected_middle:
-            return None
+        
         segments: List[Segment] = []
-        for item in annotations[:-1]:  # exclude finish for editing
-            try:
+        try:
+            for item in annotations:
+                if item.get("label") == "finish":
+                    continue  # Skip finish segment for editing
+                    
                 start = int(item["start"])
                 end = int(item["end"])
                 label = str(item["label"])
-            except (KeyError, TypeError, ValueError):
-                return None
-            segments.append(Segment(start, end, label))
+                
+                # Basic validation
+                if start < 0 or end < start:
+                    return None
+                    
+                segments.append(Segment(start, end, label))
+                
+        except (KeyError, TypeError, ValueError):
+            return None
+            
+        return segments
         return segments
 
     def _apply_existing_segments(self, segments: List[Segment]) -> None:
@@ -660,6 +998,109 @@ class VideoPoseLabellerApp:
         self.pause_video()
         self.close_video()
         self.root.destroy()
+
+
+class SegmentEditDialog:
+    """Dialog for editing segment start/end frames and labels."""
+    
+    def __init__(self, parent, start_frame: int, end_frame: int, label: str, max_frames: int):
+        self.result = None
+        
+        # Create dialog window
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("Edit Segment")
+        self.dialog.geometry("300x200")
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+        
+        # Center the dialog
+        self.dialog.update_idletasks()
+        x = (self.dialog.winfo_screenwidth() // 2) - (self.dialog.winfo_width() // 2)
+        y = (self.dialog.winfo_screenheight() // 2) - (self.dialog.winfo_height() // 2)
+        self.dialog.geometry(f"+{x}+{y}")
+        
+        # Main frame
+        main_frame = ttk.Frame(self.dialog, padding=10)
+        main_frame.grid(row=0, column=0, sticky="nsew")
+        
+        # Start frame
+        ttk.Label(main_frame, text="Start Frame:").grid(row=0, column=0, sticky="w", pady=2)
+        self.start_var = tk.StringVar(value=str(start_frame))
+        start_entry = ttk.Entry(main_frame, textvariable=self.start_var, width=10)
+        start_entry.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=2)
+        
+        # End frame
+        ttk.Label(main_frame, text="End Frame:").grid(row=1, column=0, sticky="w", pady=2)
+        self.end_var = tk.StringVar(value=str(end_frame))
+        end_entry = ttk.Entry(main_frame, textvariable=self.end_var, width=10)
+        end_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=2)
+        
+        # Label
+        ttk.Label(main_frame, text="Label:").grid(row=2, column=0, sticky="w", pady=2)
+        self.label_var = tk.StringVar(value=label)
+        label_combo = ttk.Combobox(main_frame, textvariable=self.label_var, width=10)
+        label_combo['values'] = ('prep', 'rep', 'no-rep', 'finish')
+        label_combo.grid(row=2, column=1, sticky="ew", padx=(10, 0), pady=2)
+        
+        # Info label
+        info_label = ttk.Label(main_frame, text=f"Max frame: {max_frames - 1}", foreground="gray")
+        info_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(20, 0))
+        
+        ttk.Button(button_frame, text="OK", command=self.ok_clicked).grid(row=0, column=0, padx=(0, 5))
+        ttk.Button(button_frame, text="Cancel", command=self.cancel_clicked).grid(row=0, column=1)
+        
+        # Configure grid weights
+        main_frame.columnconfigure(1, weight=1)
+        self.dialog.columnconfigure(0, weight=1)
+        self.dialog.rowconfigure(0, weight=1)
+        
+        # Store max frames for validation
+        self.max_frames = max_frames
+        
+        # Focus on start entry
+        start_entry.focus()
+        start_entry.select_range(0, tk.END)
+        
+        # Wait for dialog to close
+        self.dialog.wait_window()
+    
+    def ok_clicked(self):
+        """Validate and save the segment data."""
+        try:
+            start_frame = int(self.start_var.get())
+            end_frame = int(self.end_var.get())
+            label = self.label_var.get().strip()
+            
+            # Validation
+            if start_frame < 0 or start_frame >= self.max_frames:
+                messagebox.showerror("Invalid input", f"Start frame must be between 0 and {self.max_frames - 1}")
+                return
+            
+            if end_frame < 0 or end_frame >= self.max_frames:
+                messagebox.showerror("Invalid input", f"End frame must be between 0 and {self.max_frames - 1}")
+                return
+                
+            if start_frame >= end_frame:
+                messagebox.showerror("Invalid input", "Start frame must be less than end frame")
+                return
+            
+            if not label or label not in ('prep', 'rep', 'no-rep', 'finish'):
+                messagebox.showerror("Invalid input", "Please select a valid label")
+                return
+            
+            self.result = (start_frame, end_frame, label)
+            self.dialog.destroy()
+            
+        except ValueError:
+            messagebox.showerror("Invalid input", "Frame numbers must be integers")
+    
+    def cancel_clicked(self):
+        """Cancel the edit."""
+        self.dialog.destroy()
 
 
 def main() -> None:
