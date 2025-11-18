@@ -56,6 +56,8 @@ class VideoPoseLabellerApp:
         self.sample_json_paths: List[Path] = []
         self.binary_label: str = ""
         self.state_sequence: List[str] = []
+        self.new_video_mode: bool = False  # Track if we're working with a new unlabeled video
+        self.new_video_path: Optional[Path] = None
 
         # Video playback state
         self.capture: Optional[cv2.VideoCapture] = None
@@ -103,27 +105,33 @@ class VideoPoseLabellerApp:
             text="Select json_keypoints folder…",
             command=self.choose_json_root,
         ).grid(row=0, column=0, pady=(0, 6), sticky="ew")
+        
+        ttk.Button(
+            sidebar,
+            text="Load New Video…",
+            command=self.load_new_video,
+        ).grid(row=1, column=0, pady=(0, 6), sticky="ew")
 
         ttk.Label(sidebar, textvariable=self.root_dir_var, wraplength=220).grid(
-            row=1, column=0, sticky="ew"
+            row=2, column=0, sticky="ew"
         )
 
         ttk.Label(sidebar, text="Exercises", padding=(0, 10, 0, 0)).grid(
-            row=2, column=0, sticky="w"
+            row=3, column=0, sticky="w"
         )
         self.exercise_list = tk.Listbox(sidebar, exportselection=False, height=8)
-        self.exercise_list.grid(row=3, column=0, sticky="nsew")
+        self.exercise_list.grid(row=4, column=0, sticky="nsew")
         self.exercise_list.bind("<<ListboxSelect>>", self.on_exercise_select)
 
         ttk.Label(sidebar, text="Samples", padding=(0, 10, 0, 0)).grid(
-            row=4, column=0, sticky="w"
+            row=5, column=0, sticky="w"
         )
         self.sample_list = tk.Listbox(sidebar, exportselection=False, height=10)
-        self.sample_list.grid(row=5, column=0, sticky="nsew")
+        self.sample_list.grid(row=6, column=0, sticky="nsew")
         self.sample_list.bind("<Double-Button-1>", self.on_sample_double_click)
 
         ttk.Button(sidebar, text="Load selected sample", command=self.load_selected_sample).grid(
-            row=6, column=0, pady=(10, 0), sticky="ew"
+            row=7, column=0, pady=(10, 0), sticky="ew"
         )
 
         # Build aggregated video_config.json button
@@ -131,10 +139,10 @@ class VideoPoseLabellerApp:
             sidebar,
             text="Build video_config.json",
             command=self.build_video_config,
-        ).grid(row=7, column=0, pady=(6, 0), sticky="ew")
+        ).grid(row=8, column=0, pady=(6, 0), sticky="ew")
 
-        sidebar.rowconfigure(3, weight=1)
-        sidebar.rowconfigure(5, weight=2)
+        sidebar.rowconfigure(4, weight=1)
+        sidebar.rowconfigure(6, weight=2)
 
         main = ttk.Frame(self.root, padding=10)
         main.grid(row=0, column=1, sticky="nsew")
@@ -162,6 +170,23 @@ class VideoPoseLabellerApp:
             controls, text="Mark end of current state", command=self.mark_current_state
         )
         self.mark_button.grid(row=0, column=3, padx=8)
+        
+        # Manual windowing buttons for new video mode
+        self.mark_prep_button = ttk.Button(
+            controls, text="Mark as prep", command=lambda: self.mark_manual_segment("prep")
+        )
+        
+        self.mark_rep_button = ttk.Button(
+            controls, text="Mark as rep", command=lambda: self.mark_manual_segment("rep")
+        )
+        
+        self.mark_norep_button = ttk.Button(
+            controls, text="Mark as no-rep", command=lambda: self.mark_manual_segment("no-rep")
+        )
+        
+        self.mark_finish_button = ttk.Button(
+            controls, text="Mark as finish", command=lambda: self.mark_manual_segment("finish")
+        )
 
         self.undo_button = ttk.Button(
             controls, text="Undo last mark", command=self.undo_last_mark
@@ -902,40 +927,6 @@ class VideoPoseLabellerApp:
         self._update_annotation_view()
         self._update_buttons()
 
-    def save_annotations(self) -> None:
-        if not self.sample_json_paths or not self.state_sequence:
-            return
-        required_segments = len(self.state_sequence) - 1
-        if len(self.recorded_segments) != required_segments:
-            messagebox.showwarning(
-                "Incomplete",
-                "Please mark every state (prep and each rep/no-rep) before saving.",
-            )
-            return
-        if self.total_frames <= 0:
-            messagebox.showerror("Video error", "Unable to determine frame count for the video.")
-            return
-
-        finish_start = min(self.recorded_segments[-1].end + 1, self.total_frames - 1)
-        finish_segment = Segment(finish_start, self.total_frames - 1, "finish")
-        segments_to_save = [seg.as_dict() for seg in self.recorded_segments]
-        segments_to_save.append(finish_segment.as_dict())
-
-        for json_path in self.sample_json_paths:
-            try:
-                with json_path.open("r", encoding="utf-8") as handle:
-                    data = json.load(handle)
-            except json.JSONDecodeError as exc:
-                messagebox.showerror("JSON error", f"Failed to load {json_path.name}: {exc}")
-                return
-            data["binary_label"] = self.binary_label
-            data["annotations"] = segments_to_save
-            with json_path.open("w", encoding="utf-8") as handle:
-                json.dump(data, handle, indent=2)
-
-        self.status_var.set("Annotations saved to all JSON files")
-        messagebox.showinfo("Saved", "Annotations have been written to all JSON files.")
-
     # ------------------------------------------------------------------
     # UI updates
     # ------------------------------------------------------------------
@@ -970,16 +961,304 @@ class VideoPoseLabellerApp:
             self.annotation_tree.insert("", tk.END, values=(finish_start, self.total_frames - 1, "finish"))
 
     def _update_buttons(self) -> None:
-        has_sample = bool(self.capture and self.state_sequence)
-        mark_enabled = has_sample and self.current_state_index < len(self.state_sequence) - 1
-        undo_enabled = has_sample and self.current_state_index > 0
-        save_ready = has_sample and self.current_state_index == len(self.state_sequence) - 1
+        has_video = self.capture is not None
+        can_mark = has_video and self.current_state_index < len(self.state_sequence)
+        has_segments = bool(self.recorded_segments)
+        can_save = has_video and self.recorded_segments and (self.current_state_index >= len(self.state_sequence) or self.new_video_mode)
 
-        self.play_button.configure(state=tk.NORMAL if has_sample else tk.DISABLED)
-        self.mark_button.configure(state=tk.NORMAL if mark_enabled else tk.DISABLED)
-        self.undo_button.configure(state=tk.NORMAL if undo_enabled else tk.DISABLED)
-        self.clear_button.configure(state=tk.NORMAL if has_sample else tk.DISABLED)
-        self.save_button.configure(state=tk.NORMAL if save_ready else tk.DISABLED)
+        self.play_button.config(state="normal" if has_video else "disabled")
+        
+        # Show appropriate marking buttons based on mode
+        if self.new_video_mode and not self.binary_label:
+            # Manual windowing mode - show segment type buttons
+            self.mark_button.grid_remove()
+            self.mark_prep_button.grid(row=0, column=3, padx=2)
+            self.mark_rep_button.grid(row=0, column=4, padx=2)
+            self.mark_norep_button.grid(row=0, column=5, padx=2)
+            self.mark_finish_button.grid(row=0, column=6, padx=2)
+            
+            # Adjust other button positions
+            self.undo_button.grid(row=0, column=7, padx=2, sticky="w")
+            self.clear_button.grid(row=0, column=8, padx=2)
+            self.save_button.grid(row=0, column=9, padx=2)
+        else:
+            # Normal mode or binary-first mode - show state progression button
+            self.mark_prep_button.grid_remove()
+            self.mark_rep_button.grid_remove()
+            self.mark_norep_button.grid_remove()
+            self.mark_finish_button.grid_remove()
+            
+            self.mark_button.grid(row=0, column=3, padx=8)
+            self.undo_button.grid(row=0, column=4, padx=2, sticky="w")
+            self.clear_button.grid(row=0, column=5, padx=2)
+            self.save_button.grid(row=0, column=6, padx=2)
+        
+        self.mark_button.config(state="normal" if can_mark else "disabled")
+        self.mark_prep_button.config(state="normal" if has_video else "disabled")
+        self.mark_rep_button.config(state="normal" if has_video else "disabled")
+        self.mark_norep_button.config(state="normal" if has_video else "disabled")
+        self.mark_finish_button.config(state="normal" if has_video else "disabled")
+        
+        self.undo_button.config(state="normal" if has_segments else "disabled")
+        self.clear_button.config(state="normal" if has_segments else "disabled")
+        self.save_button.config(state="normal" if can_save else "disabled")
+
+    # ------------------------------------------------------------------
+    # New video loading functionality
+    # ------------------------------------------------------------------
+    def load_new_video(self) -> None:
+        """Load a new unlabeled video for annotation."""
+        video_path = filedialog.askopenfilename(
+            title="Select video file",
+            filetypes=[
+                ("Video files", "*.mp4 *.avi *.mov *.mkv *.wmv *.flv"),
+                ("All files", "*.*")
+            ]
+        )
+        if not video_path:
+            return
+            
+        video_path = Path(video_path)
+        if not video_path.exists():
+            messagebox.showerror("Video not found", f"Video file not found: {video_path}")
+            return
+            
+        self.pause_video()
+        self.close_video()
+        
+        if not self._open_video(video_path):
+            messagebox.showerror("Video load error", "Failed to open video")
+            return
+            
+        # Set up new video mode
+        self.new_video_mode = True
+        self.new_video_path = video_path
+        self.binary_label = ""
+        self.state_sequence = []
+        self.recorded_segments = []
+        self.sample_json_paths = []
+        
+        self.current_state_index = 0
+        self.state_start_frame = 0
+        self.seek_to_frame(0)
+        
+        self.status_var.set(f"Loaded new video: {video_path.name}")
+        self._refresh_state_ui()
+        self._update_annotation_view()
+        self._update_buttons()
+        
+        # Clear binary entry for manual mode
+        self.binary_entry.delete(0, tk.END)
+        
+        messagebox.showinfo(
+            "New video loaded",
+            "You can now either:\n\n"
+            "1. Enter a binary label (0s and 1s) and follow the normal workflow, OR\n"
+            "2. Use the manual windowing buttons (Mark as prep/rep/no-rep/finish) to create segments directly"
+        )
+    
+    def mark_manual_segment(self, label: str) -> None:
+        """Mark a segment with the specified label in manual mode."""
+        if not self.new_video_mode:
+            return
+            
+        if not self.capture:
+            messagebox.showwarning("No video", "Please load a video first.")
+            return
+            
+        # Determine start frame
+        start_frame = 0 if not self.recorded_segments else self.recorded_segments[-1].end + 1
+        end_frame = self.current_frame
+        
+        if end_frame <= start_frame:
+            messagebox.showwarning("Invalid segment", "End frame must be after start frame.")
+            return
+            
+        # Create and add the segment
+        new_segment = Segment(start_frame, end_frame, label)
+        self.recorded_segments.append(new_segment)
+        
+        self._update_annotation_view()
+        self._update_buttons()
+        self.status_var.set(f"Added {label} segment: {start_frame}-{end_frame}")
+        
+        # If this is finish, prepare for saving
+        if label == "finish":
+            self._derive_binary_from_segments()
+    
+    def _derive_binary_from_segments(self) -> None:
+        """Derive binary label from manually created segments."""
+        if not self.recorded_segments:
+            return
+            
+        # Extract rep and no-rep segments (excluding prep and finish)
+        middle_segments = [seg for seg in self.recorded_segments 
+                          if seg.label in ("rep", "no-rep")]
+        middle_segments.sort(key=lambda s: s.start)
+        
+        # Create binary string
+        binary_label = "".join("1" if seg.label == "rep" else "0" 
+                              for seg in middle_segments)
+        
+        self.binary_label = binary_label
+        self.binary_entry.delete(0, tk.END)
+        self.binary_entry.insert(0, binary_label)
+        
+        self.status_var.set(f"Derived binary label: {binary_label}")
+    
+    def save_annotations(self) -> None:
+        """Save annotations - handles both existing and new video modes."""
+        if not self.capture or not self.recorded_segments:
+            messagebox.showwarning("Nothing to save", "No annotations to save.")
+            return
+            
+        if self.new_video_mode:
+            self._save_new_video_annotations()
+        else:
+            self._save_existing_annotations()
+    
+    def _save_new_video_annotations(self) -> None:
+        """Save annotations for a new video."""
+        if not self.new_video_path or not self.binary_label:
+            messagebox.showerror("Missing data", "Binary label is required for saving.")
+            return
+            
+        # Get video naming information
+        naming_dialog = VideoNamingDialog(self.root)
+        if not naming_dialog.result:
+            return
+            
+        exercise, person, angle = naming_dialog.result
+        new_video_name = f"{exercise}_{person}_{angle}.mp4"
+        
+        # Set up paths
+        if self.json_root:
+            dataset_root = self.json_root.parent
+        else:
+            # Prompt for dataset location
+            dataset_root = filedialog.askdirectory(title="Select dataset root (CFRep/CFRep)")
+            if not dataset_root:
+                return
+            dataset_root = Path(dataset_root)
+            
+        video_dest = dataset_root / new_video_name
+        json_dir = dataset_root / "json_keypoints" / exercise / f"{exercise}_{person}_{angle}"
+        
+        try:
+            # Create directory structure
+            json_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Copy and rename video
+            import shutil
+            shutil.copy2(self.new_video_path, video_dest)
+            
+            # Create minimal JSON file
+            json_data = {
+                "video_path": f"CFRep/CFRep/{new_video_name}",
+                "dataset_type": "CocoDataset",
+                "exercise_type": exercise.upper().replace("_", "_"),
+                "binary_label": self.binary_label,
+                "frames": [],  # Empty frames for new videos
+                "annotations": [seg.as_dict() for seg in self.recorded_segments]
+            }
+            
+            # Save JSON file
+            json_path = json_dir / f"{exercise}_{person}_{angle}_minimal.json"
+            with json_path.open("w", encoding="utf-8") as f:
+                json.dump(json_data, f, indent=2)
+                
+            # Update video_config.json
+            self._update_video_configs(new_video_name, exercise, json_data)
+            
+            messagebox.showinfo(
+                "Save successful",
+                f"Video saved as: {new_video_name}\n"
+                f"JSON created: {json_path.name}\n"
+                f"Video configs updated."
+            )
+            
+            # Clean up
+            self.new_video_mode = False
+            self.new_video_path = None
+            
+        except Exception as e:
+            messagebox.showerror("Save error", f"Failed to save: {e}")
+    
+    def _save_existing_annotations(self) -> None:
+        """Save annotations for existing videos (original functionality)."""
+        if not self.sample_json_paths:
+            messagebox.showerror("No files", "No JSON files loaded to save to.")
+            return
+            
+        annotations = [seg.as_dict() for seg in self.recorded_segments]
+        
+        success_count = 0
+        for json_path in self.sample_json_paths:
+            try:
+                with json_path.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                data["annotations"] = annotations
+                data["binary_label"] = self.binary_label
+                with json_path.open("w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+                success_count += 1
+            except Exception:
+                continue
+                
+        if success_count > 0:
+            self.status_var.set(f"Annotations saved to {success_count} files")
+            messagebox.showinfo("Save complete", f"Saved annotations to {success_count} JSON files")
+        else:
+            messagebox.showerror("Save failed", "Failed to save annotations to any files")
+    
+    def _update_video_configs(self, filename: str, exercise: str, json_data: dict) -> None:
+        """Update both video_config.json and video_config.csv with new entry."""
+        if not self.json_root:
+            return
+            
+        config_dir = self.json_root.parent
+        
+        # Update video_config.json
+        json_config_path = config_dir / "video_config.json"
+        try:
+            if json_config_path.exists():
+                with json_config_path.open("r", encoding="utf-8") as f:
+                    config_list = json.load(f)
+            else:
+                config_list = []
+                
+            # Create new entry
+            segments = json_data.get("annotations", [])
+            rep_count = sum(1 for s in segments if s.get("label") == "rep")
+            
+            new_entry = {
+                "filename": filename,
+                "exercise": exercise,
+                "binary_label": json_data.get("binary_label", ""),
+                "rep_count": rep_count,
+                "segments": segments
+            }
+            
+            config_list.append(new_entry)
+            config_list.sort(key=lambda x: x.get("filename", ""))
+            
+            with json_config_path.open("w", encoding="utf-8") as f:
+                json.dump(config_list, f, indent=2)
+                
+        except Exception as e:
+            print(f"Failed to update video_config.json: {e}")
+            
+        # Update video_config.csv
+        csv_config_path = config_dir / "video_config.csv"
+        try:
+            rep_count = sum(1 for s in json_data.get("annotations", []) if s.get("label") == "rep")
+            csv_line = f"{filename},{exercise},{rep_count},{json_data.get('binary_label', '')}\n"
+            
+            with csv_config_path.open("a", encoding="utf-8") as f:
+                f.write(csv_line)
+                
+        except Exception as e:
+            print(f"Failed to update video_config.csv: {e}")
 
     # ------------------------------------------------------------------
     # Resource management
@@ -1100,6 +1379,112 @@ class SegmentEditDialog:
     
     def cancel_clicked(self):
         """Cancel the edit."""
+        self.dialog.destroy()
+
+
+class VideoNamingDialog:
+    """Dialog for collecting video naming information for new videos."""
+    
+    def __init__(self, parent):
+        self.result = None
+        
+        # Create dialog window
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("Video Naming")
+        self.dialog.geometry("400x300")
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+        
+        # Center the dialog
+        self.dialog.update_idletasks()
+        x = (self.dialog.winfo_screenwidth() // 2) - (self.dialog.winfo_width() // 2)
+        y = (self.dialog.winfo_screenheight() // 2) - (self.dialog.winfo_height() // 2)
+        self.dialog.geometry(f"+{x}+{y}")
+        
+        # Main frame
+        main_frame = ttk.Frame(self.dialog, padding=20)
+        main_frame.grid(row=0, column=0, sticky="nsew")
+        
+        # Instructions
+        ttk.Label(main_frame, text="Enter video naming information:", font=("TkDefaultFont", 10, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 15)
+        )
+        
+        # Exercise type
+        ttk.Label(main_frame, text="Exercise type:").grid(row=1, column=0, sticky="w", pady=5)
+        self.exercise_var = tk.StringVar()
+        exercise_combo = ttk.Combobox(main_frame, textvariable=self.exercise_var, width=20)
+        exercise_combo['values'] = ('double_unders', 'push_ups', 'pull_ups', 'squats', 'burpees', 'other')
+        exercise_combo.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=5)
+        
+        # Person identifier  
+        ttk.Label(main_frame, text="Person identifier:").grid(row=2, column=0, sticky="w", pady=5)
+        self.person_var = tk.StringVar()
+        person_entry = ttk.Entry(main_frame, textvariable=self.person_var, width=20)
+        person_entry.grid(row=2, column=1, sticky="ew", padx=(10, 0), pady=5)
+        
+        # Angle/Camera identifier
+        ttk.Label(main_frame, text="Camera angle/ID:").grid(row=3, column=0, sticky="w", pady=5)
+        self.angle_var = tk.StringVar()
+        angle_entry = ttk.Entry(main_frame, textvariable=self.angle_var, width=20)
+        angle_entry.grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=5)
+        
+        # Example
+        example_frame = ttk.LabelFrame(main_frame, text="Example", padding=10)
+        example_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(20, 10))
+        
+        ttk.Label(example_frame, text="Exercise: double_unders", foreground="gray").grid(row=0, column=0, sticky="w")
+        ttk.Label(example_frame, text="Person: diag_m2", foreground="gray").grid(row=1, column=0, sticky="w") 
+        ttk.Label(example_frame, text="Angle: 9_7", foreground="gray").grid(row=2, column=0, sticky="w")
+        ttk.Label(example_frame, text="Result: double_unders_diag_m2_9_7.mp4", foreground="blue").grid(row=3, column=0, sticky="w", pady=(5, 0))
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(20, 0))
+        
+        ttk.Button(button_frame, text="OK", command=self.ok_clicked).grid(row=0, column=0, padx=(0, 5))
+        ttk.Button(button_frame, text="Cancel", command=self.cancel_clicked).grid(row=0, column=1)
+        
+        # Configure grid weights
+        main_frame.columnconfigure(1, weight=1)
+        self.dialog.columnconfigure(0, weight=1)
+        self.dialog.rowconfigure(0, weight=1)
+        
+        # Focus on exercise combo
+        exercise_combo.focus()
+        
+        # Wait for dialog to close
+        self.dialog.wait_window()
+    
+    def ok_clicked(self):
+        """Validate and save the naming data."""
+        exercise = self.exercise_var.get().strip()
+        person = self.person_var.get().strip()
+        angle = self.angle_var.get().strip()
+        
+        if not exercise:
+            messagebox.showerror("Missing input", "Please enter an exercise type")
+            return
+            
+        if not person:
+            messagebox.showerror("Missing input", "Please enter a person identifier")
+            return
+            
+        if not angle:
+            messagebox.showerror("Missing input", "Please enter a camera angle/ID")
+            return
+            
+        # Basic validation for safe filename
+        for field, name in [(exercise, "exercise"), (person, "person"), (angle, "angle")]:
+            if not all(c.isalnum() or c in "_-" for c in field):
+                messagebox.showerror("Invalid input", f"{name} must contain only letters, numbers, underscores, and hyphens")
+                return
+        
+        self.result = (exercise, person, angle)
+        self.dialog.destroy()
+    
+    def cancel_clicked(self):
+        """Cancel the naming."""
         self.dialog.destroy()
 
 
