@@ -880,7 +880,7 @@ class VideoPoseLabellerApp:
     def mark_current_state(self) -> None:
         if not self.capture or not self.state_sequence:
             return
-        if self.current_state_index >= len(self.state_sequence) - 1:
+        if self.current_state_index >= len(self.state_sequence):
             messagebox.showinfo("All states marked", "All states have already been marked.")
             return
         self.pause_video()
@@ -895,7 +895,7 @@ class VideoPoseLabellerApp:
         self.recorded_segments.append(Segment(start_frame, end_frame, label))
         self.current_state_index += 1
         self.state_start_frame = min(end_frame + 1, max(self.total_frames - 1, 0))
-        if self.current_state_index < len(self.state_sequence) - 1:
+        if self.current_state_index < len(self.state_sequence):
             self.seek_to_frame(self.state_start_frame)
         self._refresh_state_ui()
         self._update_annotation_view()
@@ -935,11 +935,11 @@ class VideoPoseLabellerApp:
             self.current_state_var.set("No sample loaded")
             self.sequence_var.set("")
             return
-        if self.current_state_index < len(self.state_sequence) - 1:
+        if self.current_state_index < len(self.state_sequence):
             current_label = self.state_sequence[self.current_state_index]
             self.current_state_var.set(f"Current state: {current_label} — mark its end")
         else:
-            self.current_state_var.set("All states marked. Finish will snap to the last frame on save.")
+            self.current_state_var.set("All states marked. Ready to save.")
 
         decorated = []
         for idx, label in enumerate(self.state_sequence):
@@ -956,15 +956,20 @@ class VideoPoseLabellerApp:
             self.annotation_tree.delete(child)
         for seg in self.recorded_segments:
             self.annotation_tree.insert("", tk.END, values=(seg.start, seg.end, seg.label))
-        if self.state_sequence and len(self.recorded_segments) == len(self.state_sequence) - 1:
-            finish_start = min(self.recorded_segments[-1].end + 1, self.total_frames - 1)
-            self.annotation_tree.insert("", tk.END, values=(finish_start, self.total_frames - 1, "finish"))
 
     def _update_buttons(self) -> None:
         has_video = self.capture is not None
         can_mark = has_video and self.current_state_index < len(self.state_sequence)
         has_segments = bool(self.recorded_segments)
-        can_save = has_video and self.recorded_segments and (self.current_state_index >= len(self.state_sequence) or self.new_video_mode)
+        # In classic flow, allow saving when we've advanced through all states
+        # OR when the last segment is an explicit "finish". In new-video mode
+        # we allow saving as soon as there are segments.
+        last_is_finish = bool(self.recorded_segments and self.recorded_segments[-1].label == "finish")
+        can_save = has_video and has_segments and (
+            self.new_video_mode
+            or self.current_state_index >= len(self.state_sequence)
+            or last_is_finish
+        )
 
         self.play_button.config(state="normal" if has_video else "disabled")
         
