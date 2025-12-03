@@ -1214,7 +1214,14 @@ class VideoPoseLabellerApp:
         if self.binary_label:
             # Show with binary label reference
             seg_info = " | ".join(f"{s.label[0].upper()}{i+1}: {s.start}-{s.end}" for i, s in enumerate(segments))
-            binary_display = "Binary: " + "".join("1" if segments[i].label == "rep" else "0" if i < len(segments) else "?" for i in range(len(self.binary_label)))
+            # Build binary display: show marked segments and remaining as "?"
+            binary_chars = []
+            for i in range(len(self.binary_label)):
+                if i < len(segments):
+                    binary_chars.append("1" if segments[i].label == "rep" else "0")
+                else:
+                    binary_chars.append("?")
+            binary_display = "Binary: " + "".join(binary_chars)
             self.sequence_var.set(f"{seg_info}\n{binary_display}" if seg_info else binary_display)
         else:
             seg_info = " | ".join(f"{s.label}: {s.start}-{s.end}" for s in segments)
