@@ -74,6 +74,11 @@ class VideoPoseLabellerApp:
         self.recorded_segments: List[Segment] = []
         self.current_state_index: int = 0
         self.state_start_frame: int = 0
+        
+        # Rep boundary marking state
+        self.rep_mode: bool = False  # True when in rep start/end marking mode
+        self.awaiting_rep_end: bool = False  # True when waiting for rep end after start
+        self.current_rep_start: Optional[int] = None  # Frame where current rep started
 
         # UI state variables
         self.root_dir_var = tk.StringVar(value="Choose a json_keypoints root folder")
@@ -171,6 +176,11 @@ class VideoPoseLabellerApp:
         )
         self.mark_button.grid(row=0, column=3, padx=8)
         
+        # Rep boundary marking button
+        self.mark_rep_boundary_button = ttk.Button(
+            controls, text="Mark rep start", command=self.mark_rep_boundary
+        )
+        
         # Manual windowing buttons for new video mode
         self.mark_prep_button = ttk.Button(
             controls, text="Mark as prep", command=lambda: self.mark_manual_segment("prep")
@@ -235,6 +245,16 @@ class VideoPoseLabellerApp:
         ttk.Button(binary_frame, text="Update", command=self.on_binary_label_changed).grid(
             row=0, column=2, padx=(5, 0)
         )
+        
+        # Rep mode toggle
+        self.rep_mode_var = tk.BooleanVar(value=False)
+        self.rep_mode_check = ttk.Checkbutton(
+            binary_frame, 
+            text="Rep start/end mode",
+            variable=self.rep_mode_var,
+            command=self.toggle_rep_mode
+        )
+        self.rep_mode_check.grid(row=0, column=3, padx=(10, 0))
 
         ttk.Label(info_frame, textvariable=self.current_state_var, anchor="w").grid(
             row=1, column=0, sticky="ew"
@@ -364,6 +384,13 @@ class VideoPoseLabellerApp:
         assert self.json_root is not None
         self.pause_video()
         self.close_video()
+        
+        # Reset all mode flags
+        self.new_video_mode = False
+        self.rep_mode = False
+        self.rep_mode_var.set(False)
+        self.awaiting_rep_end = False
+        self.current_rep_start = None
 
         sample_dir = self.json_root / exercise / sample
         json_files = sorted(sample_dir.glob("*.json"))
@@ -902,6 +929,24 @@ class VideoPoseLabellerApp:
         self._update_buttons()
 
     def undo_last_mark(self) -> None:
+        if self.rep_mode:
+            # In rep mode, handle undo differently
+            if self.awaiting_rep_end:
+                # Cancel the current rep start
+                self.awaiting_rep_end = False
+                self.current_rep_start = None
+                self.mark_rep_boundary_button.config(text="Mark rep start")
+                self.status_var.set("Rep start cancelled")
+                self._refresh_rep_mode_ui()
+            elif self.recorded_segments:
+                # Remove last rep segment
+                self.recorded_segments.pop()
+                self._update_annotation_view()
+                self._refresh_rep_mode_ui()
+                self.status_var.set("Last rep removed")
+            self._update_buttons()
+            return
+        
         if self.current_state_index == 0:
             return
         self.pause_video()
@@ -914,6 +959,20 @@ class VideoPoseLabellerApp:
         self._update_buttons()
 
     def clear_annotations(self) -> None:
+        if self.rep_mode:
+            if not messagebox.askyesno("Clear annotations", "Discard all rep marks?"):
+                return
+            self.pause_video()
+            self.recorded_segments.clear()
+            self.awaiting_rep_end = False
+            self.current_rep_start = None
+            self.mark_rep_boundary_button.config(text="Mark rep start")
+            self.seek_to_frame(0)
+            self._refresh_rep_mode_ui()
+            self._update_annotation_view()
+            self._update_buttons()
+            return
+        
         if not self.state_sequence:
             return
         if not messagebox.askyesno("Clear annotations", "Discard all marks for this sample?"):
@@ -969,14 +1028,28 @@ class VideoPoseLabellerApp:
             self.new_video_mode
             or self.current_state_index >= len(self.state_sequence)
             or last_is_finish
+            or self.rep_mode  # In rep mode, allow saving once we have segments
         )
 
         self.play_button.config(state="normal" if has_video else "disabled")
         
         # Show appropriate marking buttons based on mode
-        if self.new_video_mode and not self.binary_label:
+        if self.rep_mode:
+            # Rep boundary mode - show rep start/end button
+            self.mark_button.grid_remove()
+            self.mark_prep_button.grid_remove()
+            self.mark_rep_button.grid_remove()
+            self.mark_norep_button.grid_remove()
+            self.mark_finish_button.grid_remove()
+            
+            self.mark_rep_boundary_button.grid(row=0, column=3, padx=8)
+            self.undo_button.grid(row=0, column=4, padx=2, sticky="w")
+            self.clear_button.grid(row=0, column=5, padx=2)
+            self.save_button.grid(row=0, column=6, padx=2)
+        elif self.new_video_mode and not self.binary_label:
             # Manual windowing mode - show segment type buttons
             self.mark_button.grid_remove()
+            self.mark_rep_boundary_button.grid_remove()
             self.mark_prep_button.grid(row=0, column=3, padx=2)
             self.mark_rep_button.grid(row=0, column=4, padx=2)
             self.mark_norep_button.grid(row=0, column=5, padx=2)
@@ -992,6 +1065,7 @@ class VideoPoseLabellerApp:
             self.mark_rep_button.grid_remove()
             self.mark_norep_button.grid_remove()
             self.mark_finish_button.grid_remove()
+            self.mark_rep_boundary_button.grid_remove()
             
             self.mark_button.grid(row=0, column=3, padx=8)
             self.undo_button.grid(row=0, column=4, padx=2, sticky="w")
@@ -999,6 +1073,7 @@ class VideoPoseLabellerApp:
             self.save_button.grid(row=0, column=6, padx=2)
         
         self.mark_button.config(state="normal" if can_mark else "disabled")
+        self.mark_rep_boundary_button.config(state="normal" if has_video else "disabled")
         self.mark_prep_button.config(state="normal" if has_video else "disabled")
         self.mark_rep_button.config(state="normal" if has_video else "disabled")
         self.mark_norep_button.config(state="normal" if has_video else "disabled")
@@ -1007,6 +1082,96 @@ class VideoPoseLabellerApp:
         self.undo_button.config(state="normal" if has_segments else "disabled")
         self.clear_button.config(state="normal" if has_segments else "disabled")
         self.save_button.config(state="normal" if can_save else "disabled")
+
+    # ------------------------------------------------------------------
+    # Rep boundary marking mode
+    # ------------------------------------------------------------------
+    def toggle_rep_mode(self) -> None:
+        """Toggle between classic state sequence mode and rep boundary marking mode."""
+        self.rep_mode = self.rep_mode_var.get()
+        
+        if self.rep_mode:
+            # Entering rep mode
+            self.awaiting_rep_end = False
+            self.current_rep_start = None
+            self.mark_rep_boundary_button.config(text="Mark rep start")
+            self.status_var.set("Rep mode: Click 'Mark rep start' at the beginning of each rep")
+            self._refresh_rep_mode_ui()
+        else:
+            # Exiting rep mode
+            if self.awaiting_rep_end:
+                response = messagebox.askyesno(
+                    "Incomplete rep",
+                    "You have an incomplete rep (start marked but no end). Discard it?"
+                )
+                if response:
+                    self.awaiting_rep_end = False
+                    self.current_rep_start = None
+                else:
+                    self.rep_mode_var.set(True)
+                    self.rep_mode = True
+                    return
+            self._refresh_state_ui()
+        
+        self._update_buttons()
+    
+    def mark_rep_boundary(self) -> None:
+        """Mark rep start or end boundary based on current state."""
+        if not self.capture:
+            messagebox.showwarning("No video", "Please load a video first.")
+            return
+        
+        self.pause_video()
+        
+        if not self.awaiting_rep_end:
+            # Mark rep start
+            self.current_rep_start = self.current_frame
+            self.awaiting_rep_end = True
+            self.mark_rep_boundary_button.config(text="Mark rep end")
+            self.status_var.set(f"Rep start marked at frame {self.current_frame}. Now mark the rep end.")
+        else:
+            # Mark rep end
+            if self.current_frame <= self.current_rep_start:
+                messagebox.showwarning(
+                    "Invalid range",
+                    f"Rep end ({self.current_frame}) must be after rep start ({self.current_rep_start})"
+                )
+                return
+            
+            # Create rep segment
+            new_rep = Segment(self.current_rep_start, self.current_frame, "rep")
+            self.recorded_segments.append(new_rep)
+            self.recorded_segments.sort(key=lambda s: s.start)
+            
+            rep_count = sum(1 for s in self.recorded_segments if s.label == "rep")
+            self.status_var.set(f"Rep {rep_count} recorded: {self.current_rep_start}-{self.current_frame}")
+            
+            # Reset for next rep
+            self.awaiting_rep_end = False
+            self.current_rep_start = None
+            self.mark_rep_boundary_button.config(text="Mark rep start")
+            
+            self._update_annotation_view()
+            self._refresh_rep_mode_ui()
+            self._update_buttons()
+    
+    def _refresh_rep_mode_ui(self) -> None:
+        """Update UI for rep boundary marking mode."""
+        if not self.rep_mode:
+            return
+        
+        rep_count = sum(1 for s in self.recorded_segments if s.label == "rep")
+        
+        if self.awaiting_rep_end:
+            self.current_state_var.set(f"Awaiting rep end (start: frame {self.current_rep_start})")
+        else:
+            self.current_state_var.set(f"Ready to mark rep start ({rep_count} reps recorded)")
+        
+        # Show rep segments in sequence
+        rep_segments = [s for s in self.recorded_segments if s.label == "rep"]
+        rep_segments.sort(key=lambda s: s.start)
+        rep_info = " | ".join(f"Rep {i+1}: {s.start}-{s.end}" for i, s in enumerate(rep_segments))
+        self.sequence_var.set(rep_info if rep_info else "No reps marked yet")
 
     # ------------------------------------------------------------------
     # New video loading functionality
