@@ -1138,13 +1138,19 @@ class VideoPoseLabellerApp:
                 )
                 return
             
-            # Create rep segment
-            new_rep = Segment(self.current_rep_start, self.current_frame, "rep")
-            self.recorded_segments.append(new_rep)
+            # Determine label: check binary label or ask user
+            label = self._determine_rep_label()
+            if label is None:
+                # User cancelled
+                return
+            
+            # Create segment with appropriate label
+            new_segment = Segment(self.current_rep_start, self.current_frame, label)
+            self.recorded_segments.append(new_segment)
             self.recorded_segments.sort(key=lambda s: s.start)
             
-            rep_count = sum(1 for s in self.recorded_segments if s.label == "rep")
-            self.status_var.set(f"Rep {rep_count} recorded: {self.current_rep_start}-{self.current_frame}")
+            segment_count = len([s for s in self.recorded_segments if s.label in ("rep", "no-rep")])
+            self.status_var.set(f"Segment {segment_count} ({label}) recorded: {self.current_rep_start}-{self.current_frame}")
             
             # Reset for next rep
             self.awaiting_rep_end = False
@@ -1155,23 +1161,64 @@ class VideoPoseLabellerApp:
             self._refresh_rep_mode_ui()
             self._update_buttons()
     
+    def _determine_rep_label(self) -> Optional[str]:
+        """Determine if current segment should be 'rep' or 'no-rep' based on binary label or user input."""
+        if self.binary_label:
+            # Use binary label to determine rep vs no-rep
+            # Count how many rep/no-rep segments we already have
+            existing_count = len([s for s in self.recorded_segments if s.label in ("rep", "no-rep")])
+            
+            if existing_count < len(self.binary_label):
+                # Use the next bit in the binary label
+                bit = self.binary_label[existing_count]
+                return "rep" if bit == "1" else "no-rep"
+            else:
+                # Already marked all segments from binary label
+                messagebox.showwarning(
+                    "All segments marked",
+                    f"You've already marked {existing_count} segments matching your binary label ({self.binary_label}). "
+                    "Either finish with the current segments or update the binary label."
+                )
+                return None
+        else:
+            # No binary label - ask user
+            result = messagebox.askyesno(
+                "Classify segment",
+                f"Is this segment (frames {self.current_rep_start}-{self.current_frame}) a successful rep?\n\n"
+                "Yes = rep\nNo = no-rep"
+            )
+            return "rep" if result else "no-rep"
+    
     def _refresh_rep_mode_ui(self) -> None:
         """Update UI for rep boundary marking mode."""
         if not self.rep_mode:
             return
         
         rep_count = sum(1 for s in self.recorded_segments if s.label == "rep")
+        no_rep_count = sum(1 for s in self.recorded_segments if s.label == "no-rep")
+        total_segments = rep_count + no_rep_count
         
         if self.awaiting_rep_end:
-            self.current_state_var.set(f"Awaiting rep end (start: frame {self.current_rep_start})")
+            self.current_state_var.set(f"Awaiting segment end (start: frame {self.current_rep_start})")
         else:
-            self.current_state_var.set(f"Ready to mark rep start ({rep_count} reps recorded)")
+            if self.binary_label:
+                remaining = len(self.binary_label) - total_segments
+                self.current_state_var.set(f"Ready to mark segment start ({total_segments}/{len(self.binary_label)} marked, {remaining} remaining)")
+            else:
+                self.current_state_var.set(f"Ready to mark segment start ({rep_count} reps, {no_rep_count} no-reps)")
         
-        # Show rep segments in sequence
-        rep_segments = [s for s in self.recorded_segments if s.label == "rep"]
-        rep_segments.sort(key=lambda s: s.start)
-        rep_info = " | ".join(f"Rep {i+1}: {s.start}-{s.end}" for i, s in enumerate(rep_segments))
-        self.sequence_var.set(rep_info if rep_info else "No reps marked yet")
+        # Show all rep/no-rep segments in sequence
+        segments = [s for s in self.recorded_segments if s.label in ("rep", "no-rep")]
+        segments.sort(key=lambda s: s.start)
+        
+        if self.binary_label:
+            # Show with binary label reference
+            seg_info = " | ".join(f"{s.label[0].upper()}{i+1}: {s.start}-{s.end}" for i, s in enumerate(segments))
+            binary_display = "Binary: " + "".join("1" if segments[i].label == "rep" else "0" if i < len(segments) else "?" for i in range(len(self.binary_label)))
+            self.sequence_var.set(f"{seg_info}\n{binary_display}" if seg_info else binary_display)
+        else:
+            seg_info = " | ".join(f"{s.label}: {s.start}-{s.end}" for s in segments)
+            self.sequence_var.set(seg_info if seg_info else "No segments marked yet")
 
     # ------------------------------------------------------------------
     # New video loading functionality
