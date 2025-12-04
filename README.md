@@ -8,11 +8,23 @@ This tool provides a streamlined workflow for manually labeling exercise repetit
 
 ## Features
 
+### Core Functionality
 - **Simple Video Navigation**: Frame-by-frame control with play/pause and slider
 - **JSON Integration**: Reads pose keypoint data from RepJudge output files
-- **Structured Labeling**: Predefined state sequence based on binary repetition labels
 - **Batch Processing**: Load and annotate multiple samples from organized directories
 - **Persistent Annotations**: Save labels back to JSON files for further analysis
+
+### Labeling Modes
+- **Classic State Sequence Mode**: Mark continuous state transitions (prep → rep → no-rep → finish)
+- **Rep Boundary Mode**: Mark individual rep start/end points with automatic classification
+- **Manual Windowing Mode**: Create custom segments for new videos without pose data
+- **Flexible Binary Labels**: Edit and update binary labels on the fly
+
+### Advanced Features
+- **Annotation Editing**: Edit, delete, or insert segments after creation
+- **New Video Support**: Load and annotate videos without existing keypoint data
+- **Video Configuration**: Build aggregated config files (video_config.json) for all labeled videos
+- **Automatic File Management**: Rename and organize new videos into dataset structure
 
 ## Exercise State Sequence
 
@@ -84,6 +96,8 @@ project_root/
 - This generates the state sequence for annotation
 
 ### 4. Annotating Videos
+
+#### Classic State Sequence Mode (Default)
 1. Use video controls to navigate:
    - **Play/Pause**: Start/stop video playback  
    - **Frame buttons**: Step forward/backward by single frames
@@ -94,31 +108,127 @@ project_root/
    - Click "Mark end of current state"
    - Progress through: prep → rep/no-rep phases → finish
 
-3. Edit annotations:
-   - **Undo last mark**: Remove the most recent annotation
-   - **Clear annotations**: Start over with a clean slate
+#### Rep Boundary Mode (New!)
+For precise labeling when athletes rest between reps:
 
-### 5. Saving Results
-- Complete all states before saving (prep + all rep/no-rep + finish)
+1. **Enable Rep Mode**: Check "Rep start/end mode" checkbox
+2. **Mark Each Rep**:
+   - Navigate to rep start → Click "Mark rep start"
+   - Navigate to rep end → Click "Mark rep end"
+   - If binary label exists: segment is automatically classified as rep/no-rep
+   - If no binary label: you'll be prompted to classify as rep or no-rep
+3. **Repeat** for all reps - rest periods are naturally excluded
+4. **Benefits**: 
+   - Handles incomplete reps
+   - Marks only actual rep executions
+   - Automatic rep/no-rep classification based on binary label
+
+#### Annotation Management
+- **Edit Selected**: Double-click or select annotation and click "Edit Selected"
+- **Delete Selected**: Remove specific annotation segments
+- **Insert Segment**: Add new segments at any point
+- **Undo last mark**: Remove the most recent annotation
+- **Clear annotations**: Start over with a clean slate
+- **Binary Label Editing**: Update binary labels directly in the UI
+
+### 5. Loading New Videos (No Existing Data)
+
+For adding completely new videos to your dataset:
+
+1. **Click "Load New Video..."** button
+2. **Select video file** from file browser
+3. **Choose annotation method**:
+   - Enter binary label and use state sequence mode, OR
+   - Use manual windowing buttons (Mark as prep/rep/no-rep/finish), OR
+   - Enable rep mode and mark individual reps
+4. **Save with naming**: Provide exercise type, person ID, and camera angle
+5. **Auto-organization**: Video is copied, renamed, and JSON files created automatically
+
+### 6. Building Video Configuration
+
+To create an aggregated registry of all labeled videos:
+
+1. **Click "Build video_config.json"** button
+2. **Automatic aggregation**: Scans all samples and creates unified config
+3. **Output**: Creates `video_config.json` with entries for each video including:
+   - Filename, exercise type, binary label
+   - Rep count and full segment list
+   - Sorted and formatted for easy parsing
+
+### 7. Saving Results
+- **Classic mode**: Complete all states before saving
+- **Rep mode**: Save once you've marked all desired reps
+- **New videos**: Provide naming info and files are auto-organized
 - Click "Save annotations" to write labels back to JSON files
 - Annotations are saved across all JSON files for the sample
 
 ## JSON Format
 
-The tool reads and writes to JSON files with this structure:
+### Individual Frame JSON Files
+Each frame's JSON file stores keypoints and segment label:
+
+**Classic State Sequence Mode:**
 ```json
 {
-  "video_path": "path/to/video.mp4",
-  "binary_label": "1010", 
-  "keypoints": [...],
-  "annotations": [
-    {"start": 0, "end": 50, "label": "prep"},
-    {"start": 51, "end": 120, "label": "rep"},
-    {"start": 121, "end": 180, "label": "no-rep"},
-    {"start": 181, "end": 240, "label": "rep"},
-    {"start": 241, "end": 300, "label": "no-rep"},
-    {"start": 301, "end": 350, "label": "finish"}
-  ]
+    "file_name": "frame_0001.json",
+    "annotations": {
+        "segment": "prep",  // or "rep", "no-rep", "finish", "unlabeled"
+        "keypoints": [...],
+        "bbox": [...]
+    }
+}
+```
+
+**Rep Boundary Mode:**
+Individual reps marked with precise start/end frames, leaving rest periods as prep/finish:
+```json
+// Frame in rest period before first rep
+{
+    "file_name": "frame_0010.json",
+    "annotations": {
+        "segment": "prep",
+        "keypoints": [...],
+        "bbox": [...]
+    }
+}
+
+// Frame during first rep execution
+{
+    "file_name": "frame_0025.json",
+    "annotations": {
+        "segment": "rep",  // or "no-rep" if incomplete attempt
+        "keypoints": [...],
+        "bbox": [...]
+    }
+}
+
+// Frame in rest period between reps
+{
+    "file_name": "frame_0040.json",
+    "annotations": {
+        "segment": "prep",  // automatically filled between reps
+        "keypoints": [...],
+        "bbox": [...]
+    }
+}
+```
+
+### video_config.json Format
+Aggregated registry of all labeled videos (created via "Build video_config.json" button):
+```json
+{
+    "squat_p1_45.mp4": {
+        "exercise": "squat",
+        "binary_label": "1111100",
+        "rep_count": 7,
+        "segments": ["prep", "prep", "rep", "rep", "no-rep", "rep", "rep", "rep", "rep", "rep", "finish"]
+    },
+    "pushup_p2_90.mp4": {
+        "exercise": "pushup",
+        "binary_label": "11111",
+        "rep_count": 5,
+        "segments": ["prep", "rep", "rep", "rep", "rep", "rep", "finish"]
+    }
 }
 ```
 
